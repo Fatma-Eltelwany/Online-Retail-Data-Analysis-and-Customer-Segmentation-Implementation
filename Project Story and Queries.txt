@@ -1,0 +1,135 @@
+/*Questions
+The big question: We want to open a physical store somewhere, but we are not sure
+which country to choose...
+1- What is the country with the most sales? 
+2- What is the country with the highest customer buying power?
+3- What is the most selling product in the country with the most sales?
+4- What is the number of customers in UK?
+How much is that number compared to the total number of customers?
+5- How much a customer from UK is likey to pay per purchase?
+*/
+
+--1 What is the country with the most sales?
+select *, dense_rank() over(order by country_sales desc) as country_rnk
+from(
+	select distinct "Country", country_sales from (	
+		select *, count(*) over(partition by "Country")
+		as country_sales from online_retail)as sub1) as sub2;
+-- The UK has the most sales, Germany comes second.
+------------------------------------------------------------------------
+--2 What is the country with the highest customer buying power?
+-- customer buying power is how much money a customer has spent on our online store
+select * from (
+	select distinct "Country", count(*) over(partition by "Country") as country_count
+	 from (
+		select *, percent_rank() 
+		over(order by total_per_customer) as cust_pct_rnk
+		from(
+			select distinct "CustomerID", "Country", sum("UnitPrice"*"Quantity")
+			over(partition by "CustomerID") as total_per_customer
+			from online_retail where "CustomerID" <> '') as sub1) as sub2
+			where cust_pct_rnk >= 0.95) as sub3
+			order by country_count desc;
+-- 18 countries have customers in the 95th percentile or above regarding buying power (The output of the two subqueries, without sub3)
+-- let's see which country has the majority of those customers
+-- Again the UK has a whopping 179 customers in the 0.95 percentile or above (The output when sub3 is included)
+-- The UK is then the best location to open a physical store.
+-- Second best, regarding both sales and buying power, is Germany.
+------------------------------------------------------------------------
+--3 What are the most two selling products in the country with the most sales?
+select * from (	
+	select distinct "Description",
+	sum("Quantity") over(partition by "Description") as total_sold
+	from online_retail 
+	where "Country" = 'United Kingdom' and "Description" <> '') as sub
+	order by total_sold desc;
+/* WORLD WAR 2 GLIDERS ASSTD DESIGNS and JUMBO BAG RED RETROSPOT 
+are the two most selling products in the UK */
+-------------------------------------------------------------------------
+--4 What is the number of customers in UK?
+select count(distinct "CustomerID") as cust_uk from online_retail
+where "Country" = 'United Kingdom';
+-- cust_uk = 3951
+-- how much is that number compared to the total number of customers?
+with
+s1 as (select count(distinct "CustomerID") as cust_uk from online_retail
+where "Country" = 'United Kingdom'),
+s2 as (select count(distinct "CustomerID") as cust_total from online_retail)
+select round(cast(s1.cust_uk as float)/(cast(s2.cust_total as float))*100) || '%' as cust_uk_pct
+from s1, s2;
+-- around 90 percent
+/* This piece of information might suggest that we open the store elsewhere to increase our customer base
+as we already have a good number of customers in the UK who will still buy from our store. */
+------------------------------------------------------------------------------
+--5 How much a customer from UK is likey to pay per purchase?
+select round(avg(total_per_invoice)) as avg_invoice_for_uk_cust
+from (
+	select distinct "InvoiceNo", "CustomerID", sum("UnitPrice"*"Quantity")
+	over(partition by "InvoiceNo") as total_per_invoice
+	from online_retail
+	where "Country" = 'United Kingdom'
+	and "CustomerID" <> ''
+	order by "CustomerID") as sub;
+-- A customer from the UK is likely to spend 341 (pound/dollar?) per purhcase
+-----------------------------------------------------------------------------
+--Question 2
+/* Recency => how recent the last transaction is (Hint: choose a reference date, which is
+the most recent purchase in the dataset )
+ Frequency => how many times the customer has bought from our store
+ Monetary => how much each customer has paid for our products */
+
+select distinct "CustomerID", recency, frequency, monetary, r_score, fm_score,
+case when (r_score = 5 and fm_score = 5) 
+            or (r_score = 5 and fm_score = 4) 
+            or (r_score = 4 and fm_score = 5) 
+        then 'Champions'
+		 when (r_score = 5 and fm_score = 2) 
+            or (r_score = 4 and fm_score = 2)
+            or (r_score = 3 and fm_score = 3)
+            or (r_score = 4 and fm_score = 3)
+        then 'Potential Loyalists'
+        when (r_score = 5 and fm_score =3) 
+            or (r_score = 4 and fm_score = 4)
+            or (r_score = 3 and fm_score = 5)
+            or (r_score = 3 and fm_score = 4)
+        then 'Loyal Customers'
+        when r_score = 5 and fm_score = 1 then 'Recent Customers'
+        when (r_score = 4 and fm_score = 1) 
+            or (r_score = 3 and fm_score = 1)
+        then 'Promising'
+        when (r_score = 3 and fm_score = 2) 
+            or (r_score = 2 and fm_score = 3)
+            or (r_score = 2 and fm_score = 2)
+        then 'Customers Needing Attention'
+        when (r_score = 2 and fm_score = 5) 
+            or (r_score = 2 and fm_score = 4)
+            or (r_score = 1 and fm_score = 3)
+        then 'At Risk'
+        when (r_score = 1 and fm_score = 5)
+            or (r_score = 1 and fm_score = 4)        
+        then 'Cant Lose Them'
+        when r_score = 1 and fm_score = 2 then 'Hibernating'
+        when r_score = 1 and fm_score = 1 then 'Lost'
+--There is one missing permutation, 2 and 1.It is not shown on the guide table but shown on the screenshot table.
+		when r_score = 2 and fm_score = 1 then 'About to Sleep' 
+end as cust_segment 
+from (
+	select *,
+	ntile(5) over(order by ((f_score+m_score)/2)) 
+	as fm_score
+	from (
+		select *,
+		ntile(5) over(order by recency desc) as r_score, ntile(5) over(order by frequency) as f_score,
+			ntile(5) over(order by monetary) as m_score /* I casted f_score and m_score to 5 tiles
+			before taking their average, because they don't have the same range of values. It would not make
+			sense mathematically to average them now.*/
+		from (
+				select distinct "CustomerID", dense_rank() 
+				over(partition by "CustomerID" order by "InvoiceDate" desc) as recency,
+				count(*) over(partition by "CustomerID", "InvoiceNo") as frequency, /* Here I want to count the number of whole 
+				purchases for each customer. I think not partitioning by invoiceno will count the number of items
+				(without their quantities of course) in all the customer's purchases. */
+				sum("UnitPrice"*"Quantity")
+				over(partition by "CustomerID") as monetary
+				from online_retail
+				where "CustomerID" <> '') as sub1) as sub2) as sub3;
